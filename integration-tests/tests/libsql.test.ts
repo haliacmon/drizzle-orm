@@ -6,6 +6,7 @@ import anyTest from 'ava';
 import {
 	asc,
 	eq,
+	getTableColumns,
 	gt,
 	gte,
 	inArray,
@@ -53,6 +54,16 @@ const usersTable = sqliteTable('users', {
 	verified: integer('verified', { mode: 'boolean' }).notNull().default(false),
 	json: blob('json', { mode: 'json' }).$type<string[]>(),
 	createdAt: integer('created_at', { mode: 'timestamp' }).notNull().default(sql`strftime('%s', 'now')`),
+});
+
+const usersOnUpdate = sqliteTable('users_on_update', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	name: text('name').notNull(),
+	updateCounter: integer('update_counter').default(sql`1`).$onUpdateFn(() => sql`update_counter + 1`),
+	updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$onUpdate(() => new Date()),
+	// uppercaseName: text('uppercase_name').$onUpdateFn(() =>
+	// 	sql`upper(s.name)`
+	// ),  This doesn't seem to be supported in sqlite
 });
 
 const users2Table = sqliteTable('users2', {
@@ -2422,4 +2433,88 @@ test.serial('set operations (mixed all) as function with subquery', async (t) =>
 				.from(citiesTable).where(gt(citiesTable.id, 1)),
 		).orderBy(asc(sql`id`));
 	});
+});
+
+test.serial('test $onUpdateFn and $onUpdate works as $default', async (t) => {
+	const { db } = t.context;
+
+	await db.run(sql`drop table if exists ${usersOnUpdate}`);
+
+	await db.run(
+		sql`
+			create table ${usersOnUpdate} (
+			        id integer primary key autoincrement,
+			        name text not null,
+			        update_counter integer default 1 not null,
+			        updated_at integer
+			      )
+		`,
+	);
+
+	await db.insert(usersOnUpdate).values([
+		{ name: 'John' },
+		{ name: 'Jane' },
+		{ name: 'Jack' },
+		{ name: 'Jill' },
+	]);
+	const { updatedAt, ...rest } = getTableColumns(usersOnUpdate);
+
+	const justDates = await db.select({ updatedAt }).from(usersOnUpdate).orderBy(asc(usersOnUpdate.id));
+
+	const response = await db.select({ ...rest }).from(usersOnUpdate).orderBy(asc(usersOnUpdate.id));
+
+	t.deepEqual(response, [
+		{ name: 'John', id: 1, updateCounter: 1 },
+		{ name: 'Jane', id: 2, updateCounter: 1 },
+		{ name: 'Jack', id: 3, updateCounter: 1 },
+		{ name: 'Jill', id: 4, updateCounter: 1 },
+	]);
+	const msDelay = 100;
+
+	for (const eachUser of justDates) {
+		t.assert(eachUser.updatedAt!.valueOf() > Date.now() - msDelay); // This test might fail if db read is too slow. Is there a better way to test Date.now()?
+	}
+});
+
+test.serial('test $onUpdateFn and $onUpdate works updating', async (t) => {
+	const { db } = t.context;
+
+	await db.run(sql`drop table if exists ${usersOnUpdate}`);
+
+	await db.run(
+		sql`
+			create table ${usersOnUpdate} (
+			        id integer primary key autoincrement,
+			        name text not null,
+			        update_counter integer default 1 not null,
+			        updated_at integer
+			      )
+		`,
+	);
+
+	await db.insert(usersOnUpdate).values([
+		{ name: 'John' },
+		{ name: 'Jane' },
+		{ name: 'Jack' },
+		{ name: 'Jill' },
+	]);
+	const { updatedAt, ...rest } = getTableColumns(usersOnUpdate);
+
+	await db.update(usersOnUpdate).set({ name: 'Angel' }).where(eq(usersOnUpdate.id, 1));
+
+	const justDates = await db.select({ updatedAt }).from(usersOnUpdate).orderBy(asc(usersOnUpdate.id));
+
+	const response = await db.select({ ...rest }).from(usersOnUpdate).orderBy(asc(usersOnUpdate.id));
+
+	t.deepEqual(response, [
+		{ name: 'Angel', id: 1, updateCounter: 2 },
+		{ name: 'Jane', id: 2, updateCounter: 1 },
+		{ name: 'Jack', id: 3, updateCounter: 1 },
+		{ name: 'Jill', id: 4, updateCounter: 1 },
+	]);
+	const msDelay = 100;
+
+	for (const eachUser of justDates) {
+		t.assert(eachUser.updatedAt!.valueOf() > Date.now() - msDelay); // This test might fail if db read is too slow. Is there a better way to test Date.now()?
+	}
 });
