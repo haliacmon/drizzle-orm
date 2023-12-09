@@ -9,25 +9,26 @@ import {
 	arrayContains,
 	arrayOverlaps,
 	asc,
+	avg,
+	avgDistinct,
+	count,
+	countDistinct,
 	eq,
+	getTableColumns,
 	gt,
 	gte,
 	inArray,
 	lt,
+	max,
+	min,
 	name,
 	placeholder,
 	type SQL,
 	sql,
 	type SQLWrapper,
-	TransactionRollbackError,
-	count,
-	countDistinct,
-	avg,
-	avgDistinct,
 	sum,
 	sumDistinct,
-	max,
-	min,
+	TransactionRollbackError,
 } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
@@ -50,6 +51,7 @@ import {
 	macaddr,
 	macaddr8,
 	type PgColumn,
+	pgEnum,
 	pgMaterializedView,
 	pgTable,
 	pgTableCreator,
@@ -64,7 +66,6 @@ import {
 	uniqueKeyName,
 	uuid as pgUuid,
 	varchar,
-	pgEnum,
 } from 'drizzle-orm/pg-core';
 import getPort from 'get-port';
 import pg from 'pg';
@@ -81,6 +82,15 @@ const usersTable = pgTable('users', {
 	verified: boolean('verified').notNull().default(false),
 	jsonb: jsonb('jsonb').$type<string[]>(),
 	createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+const usersOnUpdate = pgTable('users_on_update', {
+	id: serial('id').primaryKey(),
+	name: text('name').notNull(),
+	updateCounter: integer('update_counter').default(sql`1`).$onUpdateFn(() => sql`update_counter + 1`),
+	updatedAt: timestamp('updated_at', { mode: 'date', precision: 3 }).$onUpdate(() => new Date()),
+	alwaysNull: text('always_null').$type<string | null>().$onUpdate(() => null),
+	// uppercaseName: text('uppercase_name').$onUpdateFn(() => sql`upper(name)`), looks like this is not supported in pg
 });
 
 const citiesTable = pgTable('cities', {
@@ -149,7 +159,7 @@ const aggregateTable = pgTable('aggregate_table', {
 	a: integer('a'),
 	b: integer('b'),
 	c: integer('c'),
-	nullOnly: integer('null_only')
+	nullOnly: integer('null_only'),
 });
 
 interface Context {
@@ -523,7 +533,7 @@ test.serial('select distinct', async (t) => {
 	const usersDistinctTable = pgTable('users_distinct', {
 		id: integer('id').notNull(),
 		name: text('name').notNull(),
-		age: integer('age').notNull()
+		age: integer('age').notNull(),
 	});
 
 	await db.execute(sql`drop table if exists ${usersDistinctTable}`);
@@ -534,7 +544,7 @@ test.serial('select distinct', async (t) => {
 		{ id: 1, name: 'John', age: 24 },
 		{ id: 2, name: 'John', age: 25 },
 		{ id: 1, name: 'Jane', age: 24 },
-		{ id: 1, name: 'Jane', age: 26 }
+		{ id: 1, name: 'Jane', age: 26 },
 	]);
 	const users1 = await db.selectDistinct().from(usersDistinctTable).orderBy(
 		usersDistinctTable.id,
@@ -547,8 +557,8 @@ test.serial('select distinct', async (t) => {
 		usersDistinctTable,
 	).orderBy(usersDistinctTable.name);
 	const users4 = await db.selectDistinctOn([usersDistinctTable.id, usersDistinctTable.age]).from(
-		usersDistinctTable
-	).orderBy(usersDistinctTable.id, usersDistinctTable.age)
+		usersDistinctTable,
+	).orderBy(usersDistinctTable.id, usersDistinctTable.age);
 
 	await db.execute(sql`drop table ${usersDistinctTable}`);
 
@@ -556,7 +566,7 @@ test.serial('select distinct', async (t) => {
 		{ id: 1, name: 'Jane', age: 24 },
 		{ id: 1, name: 'Jane', age: 26 },
 		{ id: 1, name: 'John', age: 24 },
-		{ id: 2, name: 'John', age: 25 }
+		{ id: 2, name: 'John', age: 25 },
 	]);
 
 	t.deepEqual(users2.length, 2);
@@ -570,7 +580,7 @@ test.serial('select distinct', async (t) => {
 	t.deepEqual(users4, [
 		{ id: 1, name: 'John', age: 24 },
 		{ id: 1, name: 'Jane', age: 26 },
-		{ id: 2, name: 'John', age: 25 }
+		{ id: 2, name: 'John', age: 25 },
 	]);
 });
 
@@ -3209,6 +3219,98 @@ test.serial('set operations (mixed all) as function', async (t) => {
 				.select().from(cities2Table).where(gt(citiesTable.id, 1)),
 		).orderBy(asc(sql`id`));
 	});
+});
+
+test.serial('test $onUpdateFn and $onUpdate works as $default', async (t) => {
+	const { db } = t.context;
+
+	await db.execute(sql`drop table if exists ${usersOnUpdate}`);
+
+	await db.execute(
+		sql`
+			create table ${usersOnUpdate} (
+			id serial primary key,
+			name text not null,
+			update_counter integer default 1 not null,
+			updated_at timestamp(3),
+			always_null text
+			)
+		`,
+	);
+
+	await db.insert(usersOnUpdate).values([
+		{ name: 'John' },
+		{ name: 'Jane' },
+		{ name: 'Jack' },
+		{ name: 'Jill' },
+	]);
+
+	const { updatedAt, ...rest } = getTableColumns(usersOnUpdate);
+
+	const justDates = await db.select({ updatedAt }).from(usersOnUpdate).orderBy(asc(usersOnUpdate.id));
+
+	const response = await db.select({ ...rest }).from(usersOnUpdate).orderBy(asc(usersOnUpdate.id));
+
+	t.deepEqual(response, [
+		{ name: 'John', id: 1, updateCounter: 1, alwaysNull: null },
+		{ name: 'Jane', id: 2, updateCounter: 1, alwaysNull: null },
+		{ name: 'Jack', id: 3, updateCounter: 1, alwaysNull: null },
+		{ name: 'Jill', id: 4, updateCounter: 1, alwaysNull: null },
+	]);
+	const msDelay = 250;
+
+	for (const eachUser of justDates) {
+		t.assert(eachUser.updatedAt!.valueOf() > Date.now() - msDelay);
+	}
+});
+
+test.serial('test $onUpdateFn and $onUpdate works updating', async (t) => {
+	const { db } = t.context;
+
+	await db.execute(sql`drop table if exists ${usersOnUpdate}`);
+
+	await db.execute(
+		sql`
+			create table ${usersOnUpdate} (
+			id serial primary key,
+			name text not null,
+			update_counter integer default 1,
+			updated_at timestamp(3),
+			always_null text
+			)
+		`,
+	);
+
+	await db.insert(usersOnUpdate).values([
+		{ name: 'John', alwaysNull: 'this will be null after updating' },
+		{ name: 'Jane' },
+		{ name: 'Jack' },
+		{ name: 'Jill' },
+	]);
+
+	const { updatedAt, ...rest } = getTableColumns(usersOnUpdate);
+	const initial = await db.select({ updatedAt }).from(usersOnUpdate).orderBy(asc(usersOnUpdate.id));
+
+	await db.update(usersOnUpdate).set({ name: 'Angel' }).where(eq(usersOnUpdate.id, 1));
+	await db.update(usersOnUpdate).set({ updateCounter: null }).where(eq(usersOnUpdate.id, 2));
+
+	const justDates = await db.select({ updatedAt }).from(usersOnUpdate).orderBy(asc(usersOnUpdate.id));
+
+	const response = await db.select({ ...rest }).from(usersOnUpdate).orderBy(asc(usersOnUpdate.id));
+
+	t.deepEqual(response, [
+		{ name: 'Angel', id: 1, updateCounter: 2, alwaysNull: null },
+		{ name: 'Jane', id: 2, updateCounter: null, alwaysNull: null },
+		{ name: 'Jack', id: 3, updateCounter: 1, alwaysNull: null },
+		{ name: 'Jill', id: 4, updateCounter: 1, alwaysNull: null },
+	]);
+	const msDelay = 250;
+
+	t.assert(initial[0]?.updatedAt?.valueOf() !== justDates[0]?.updatedAt?.valueOf());
+
+	for (const eachUser of justDates) {
+		t.assert(eachUser.updatedAt!.valueOf() > Date.now() - msDelay);
+	}
 });
 
 test.serial('aggregate function: count', async (t) => {
