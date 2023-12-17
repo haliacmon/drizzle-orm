@@ -5,24 +5,25 @@ import type { TestFn } from 'ava';
 import anyTest from 'ava';
 import {
 	asc,
+	avg,
+	avgDistinct,
+	count,
+	countDistinct,
 	eq,
 	gt,
 	gte,
 	inArray,
 	type InferModel,
+	max,
+	min,
 	Name,
 	name,
+	notInArray,
 	placeholder,
 	sql,
-	TransactionRollbackError,
-	count,
-	countDistinct,
-	avg,
-	avgDistinct,
 	sum,
 	sumDistinct,
-	max,
-	min
+	TransactionRollbackError,
 } from 'drizzle-orm';
 import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
@@ -126,7 +127,7 @@ const aggregateTable = sqliteTable('aggregate_table', {
 	a: integer('a'),
 	b: integer('b'),
 	c: integer('c'),
-	nullOnly: integer('null_only')
+	nullOnly: integer('null_only'),
 });
 
 test.before(async (t) => {
@@ -939,6 +940,28 @@ test.serial('select with group by complex query', async (t) => {
 		.all();
 
 	t.deepEqual(result, [{ name: 'Jane' }]);
+});
+
+test.serial('select with empty array in inArray', async (t) => {
+	const { db } = t.context;
+
+	await db.insert(usersTable).values([{ name: 'John' }, { name: 'Jane' }, { name: 'Jane' }]);
+
+	const result = await db.select({ name: usersTable.name }).from(usersTable)
+		.where(inArray(usersTable.id, []));
+
+	t.deepEqual(result, []);
+});
+
+test.serial('select with empty array in notInArray', async (t) => {
+	const { db } = t.context;
+
+	await db.insert(usersTable).values([{ name: 'John' }, { name: 'Jane' }, { name: 'Jane' }]);
+
+	const result = await db.select({ name: usersTable.name }).from(usersTable)
+		.where(notInArray(usersTable.id, []));
+
+	t.deepEqual(result, [{ name: 'John' }, { name: 'Jane' }, { name: 'Jane' }]);
 });
 
 test.serial('build query', async (t) => {
